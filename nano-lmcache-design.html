@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>nano-lmcache — design &amp; build plan</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #171a23; --ink: #e6e8ee; --muted: #9aa3b2;
+    --accent: #6ea8fe; --accent2: #7ee0c0; --warn: #ffb454; --border: #262b38;
+    --code-bg: #0b0d13; --quote-bg: #1b2030; --red: #ff9a9a; --green: #6ee7b7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 40px 16px; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header.page { border-left: 4px solid var(--accent); padding: 4px 0 4px 18px; margin-bottom: 28px; }
+  header.page h1 { margin: 0 0 6px; font-size: 26px; }
+  header.page p { margin: 0; color: var(--muted); }
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 22px 26px; margin-bottom: 22px; }
+  h2 { font-size: 20px; margin: 0 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  h2 .num { display: inline-block; background: var(--accent); color: #0b0d13; font-size: 14px; font-weight: 700;
+    width: 26px; height: 26px; line-height: 26px; text-align: center; border-radius: 6px; margin-right: 10px; }
+  h3 { font-size: 16px; margin: 22px 0 8px; color: var(--accent2); }
+  p { margin: 10px 0; }
+  ul, ol { margin: 10px 0; padding-left: 22px; } li { margin: 7px 0; }
+  strong { color: #fff; }
+  code { background: var(--code-bg); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+    font: 13px/1.5 "SF Mono", "Cascadia Code", Consolas, monospace; color: #ffd9a0; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
+  pre code { background: none; border: none; padding: 0; color: #d7e0f0; font-size: 12.5px; line-height: 1.5; }
+  blockquote { margin: 14px 0; padding: 12px 16px; background: var(--quote-bg);
+    border-left: 3px solid var(--accent2); border-radius: 0 8px 8px 0; color: #d3dbe8; }
+  blockquote.warn { border-left-color: var(--warn); }
+  blockquote.bug { border-left-color: var(--red); }
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #1d2230; }
+  footer { color: var(--muted); font-size: 13.5px; text-align: center; margin-top: 10px; }
+  .kicker { font-size: 13px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 4px; font-weight: 700; }
+  .tldr { background: linear-gradient(180deg, #1a2033, #171a23); border-color: #2c3a57; }
+  .tldr p { font-size: 17px; }
+  .ok { color: var(--green); } .bad { color: var(--red); } .cmt { color: #6b7688; }
+  .stage { border-left: 3px solid var(--accent2); padding-left: 14px; margin: 18px 0; }
+  .stage h3 { margin-top: 0; }
+  .out { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="page">
+  <h1>nano-lmcache</h1>
+  <p>Design &amp; build plan · a finishable end-to-end KV cache, written from scratch · Mac, CPU-only, no GPU</p>
+</header>
+
+<section class="tldr">
+  <p class="kicker">The goal</p>
+  <p>Build the whole pipeline — <strong>prompt &rarr; tokens &rarr; chunks &rarr; KV in L0 &rarr; store to L1
+  &rarr; evict &rarr; demote to L2</strong> — in roughly <strong>700 lines</strong> of my own code. Not a clone
+  of LMCache, not a toy that only proves what I already believe: every stage ends in something that
+  <em>runs</em> and something that can <em>fail</em>.</p>
+</section>
+
+<!-- ============================================================ 1 -->
+<section>
+  <h2><span class="num">1</span>The tier hierarchy (correcting my own mental model)</h2>
+  <p>I had this inverted — was thinking &ldquo;hot cache &rarr; cold cache &rarr; evicts to L1 storage.&rdquo;
+  It is the other way round, and there are <strong>three</strong> tiers, not two.</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Tier</th><th>What it is</th><th>Temperature</th></tr>
+    <tr><td><strong>L0</strong></td>
+      <td>The <em>engine's</em> own KV cache — the paged pool in GPU HBM (plain RAM in my setup)</td>
+      <td>hottest</td></tr>
+    <tr><td><strong>L1</strong></td>
+      <td>LMCache's in-daemon memory slab — sized by <code>--l1-size-gb</code></td>
+      <td>hot</td></tr>
+    <tr><td><strong>L2</strong></td>
+      <td>Backing adapters — local disk, remote store</td>
+      <td>cold</td></tr>
+  </table>
+  </div>
+  <p><strong>L1 <em>is</em> the hot cache.</strong> Eviction moves data <em>down and out</em> of L1 — either to
+  L2 or discarded entirely.</p>
+  <blockquote>
+    This is why every Aug 28 log line read <code>2 L1, 0 L2</code>: two chunks found in hot memory, none in cold
+    storage, because no L2 was configured. The <code>--enable-extra-logging</code> flag confirms the direction —
+    it reports <strong>&ldquo;L0&harr;L1 store/retrieve throughput.&rdquo;</strong> L0 is where data comes
+    <em>from</em>.
+  </blockquote>
+</section>
+
+<!-- ============================================================ 2 -->
+<section>
+  <h2><span class="num">2</span>Data flow</h2>
+<pre><code>"Explain KV caching"                       prompt
+        │  Tokenizer
+        ▼
+[1023, 44, 8871, 502, ...]                 token IDs
+        │  TokenDatabase: chunk(256) + chained prefix hash
+        ▼
+[(0,256,h1), (256,512,h2)]                 (start, end, key)
+        │  CacheIndex.lookup(keys)
+        ▼
+    ┌── HIT ──► fetch from L1 ──► scatter into L0 blocks ──► skip prefill
+    │                    ▲
+    │                    └── (miss in L1, found in L2 → promote up)
+    │
+    └── MISS ─► engine prefill ─► KV lands in L0, scattered blocks
+                        │  gather(block_table)
+                        ▼
+                 contiguous buffer ──► store into L1
+                        │
+                        │   1 Hz loop: usage ≥ watermark?
+                        ▼
+                 LRU picks victims ──► demote to L2  │  discard</code></pre>
+</section>
+
+<!-- ============================================================ 3 -->
+<section>
+  <h2><span class="num">3</span>Why the data path is the interesting part</h2>
+  <p>Chunking, the thing I read about for weeks, is <strong>ten lines</strong>
+  (<code>token_database.py:347&ndash;365</code>):</p>
+<pre><code>end = len(tokens) if save_unfull_chunk else (len(tokens) - len(tokens) % self.chunk_size)
+for i in range(0, end, self.chunk_size):
+    yield tokens[i : i + self.chunk_size]
+
+prefix_hash = self._get_init_hash()
+for token_chunk in token_chunks:
+    prefix_hash = self._hash_tokens(token_chunk, prefix_hash)   # &lt;- chained
+    yield prefix_hash</code></pre>
+  <p>That retroactively explains Aug 28: <strong>641 tokens &rarr; 2 chunks, 129 discarded</strong> is
+  <code>save_unfull_chunk=False</code> truncating <code>end</code> to a multiple of <code>chunk_size</code>.
+  <strong>Prefix-based reuse</strong> is the hash being <em>chained</em> — chunk N's key is
+  <code>hash(chunk_N, hash_of_everything_before)</code>. Same prefix &rarr; same keys. That is the whole
+  2/3-chunks-hit result, in one line of code.</p>
+
+  <h3>The real question: how does data leave the KV cache?</h3>
+  <p>The engine does <strong>not</strong> store KV contiguously. It is a paged pool — one big tensor carved into
+  fixed-size blocks:</p>
+<pre><code>KV pool:  [num_layers, 2, num_blocks, block_size, num_kv_heads, head_dim]
+                        ↑                ↑
+                    K and V         e.g. 16 tokens per block</code></pre>
+  <p>A request gets a <strong>block table</strong> — a list of block IDs, scattered wherever there was room:</p>
+<pre><code>request tokens:  [0 ...................................... 255]   one 256-token chunk
+block table:     [ 47 ][ 3 ][ 91 ][ 12 ][ 88 ][ 5 ] ...  16 blocks, non-contiguous
+physical pool:   ...  #3  ...  #5  ...  #12  ...  #47  ...  #88  ...  #91  ...</code></pre>
+  <p>So <strong>one LMCache chunk (256 tokens) spans 16 engine blocks (16 tokens each), scattered across the
+  pool, in every layer.</strong> Which makes the two operations obvious:</p>
+  <ul>
+    <li><strong>Store = gather.</strong> Walk the block table, pull 16 scattered blocks per layer, lay them out
+      contiguously in one buffer, hand it over.</li>
+    <li><strong>Retrieve = scatter.</strong> The new request has <em>different</em> block IDs — the pool moved
+      on. Take the contiguous buffer and write it back into wherever this request's blocks actually are.</li>
+  </ul>
+  <blockquote>
+    That is <code>EngineDrivenTransferContext</code> — &ldquo;worker gathers its scattered paged KV blocks into
+    one buffer.&rdquo; The sentence from the Aug 28 table becomes a loop with index arithmetic.
+  </blockquote>
+</section>
+
+<!-- ============================================================ 4 -->
+<section>
+  <h2><span class="num">4</span>Modules</h2>
+  <div class="tablewrap">
+  <table>
+    <tr><th>File</th><th>Responsibility</th><th>~lines</th></tr>
+    <tr><td><code>tokenizer.py</code></td><td>prompt &rarr; token IDs</td><td>20</td></tr>
+    <tr><td><code>token_db.py</code></td><td>chunk + chained prefix hash &rarr; keys</td><td>40</td></tr>
+    <tr><td><code>engine.py</code></td><td><strong>L0</strong>: paged KV pool, block allocator, fake prefill</td><td>120</td></tr>
+    <tr><td><code>transfer.py</code></td><td>gather / scatter between L0 blocks and flat buffers</td><td>80</td></tr>
+    <tr><td><code>l1.py</code></td><td>hot slab: put/get/delete, byte accounting, usage ratio</td><td>100</td></tr>
+    <tr><td><code>l2.py</code></td><td>cold tier: disk put/get</td><td>60</td></tr>
+    <tr><td><code>eviction.py</code></td><td>LRU ordering, <code>get_victims(ratio)</code></td><td>70</td></tr>
+    <tr><td><code>controller.py</code></td><td>1 Hz loop, watermark check, demote-vs-discard</td><td>60</td></tr>
+    <tr><td><code>cache.py</code></td><td>orchestrator — lookup, hit/miss, store, retrieve, promote</td><td>100</td></tr>
+    <tr><td><code>run.py</code></td><td>driver: send prompts, print what happened</td><td>60</td></tr>
+    <tr><td colspan="2" style="text-align:right"><strong>total</strong></td><td><strong>~700</strong></td></tr>
+  </table>
+  </div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section>
+  <h2><span class="num">5</span>Build order — every stage ends in something that runs</h2>
+
+  <div class="stage">
+    <h3>Stage 1 · Tokens and keys</h3>
+    <p><code>tokenizer.py</code> + <code>token_db.py</code>. Feed it a prompt, print the chunks and their chained
+    hashes. Then feed it a second prompt sharing a prefix and watch the first N hashes come out
+    <strong>identical</strong>. ~30 minutes, and prefix-based reuse stops being a claim I read somewhere.</p>
+  </div>
+
+  <div class="stage">
+    <h3>Stage 2 · The data path</h3>
+    <p><code>engine.py</code> + <code>transfer.py</code>. Build a scattered block table, gather to a flat buffer,
+    scatter into <em>different</em> blocks, assert equality. If the indexing is off by a block, a layer or a
+    head, <span class="bad">it fails</span> — this is the forcing function.</p>
+  </div>
+
+  <div class="stage">
+    <h3>Stage 3 · A real cache hit</h3>
+    <p><code>l1.py</code> + <code>cache.py</code>. Same prompt twice: miss, then hit.
+    <span class="ok">This is the 4.3&times; moment, in code I wrote.</span> Probably the stage I am actually
+    chasing.</p>
+  </div>
+
+  <div class="stage">
+    <h3>Stage 4 · Eviction</h3>
+    <p><code>eviction.py</code> + <code>controller.py</code>. Tiny L1, push distinct prompts, watch the watermark
+    trip and LRU choose victims. Replaces Stages 0&ndash;3 of the experiment plan — reading my own log lines
+    instead of the daemon's.</p>
+  </div>
+
+  <div class="stage">
+    <h3>Stage 5 · The cold tier</h3>
+    <p><code>l2.py</code>. Evict <em>to disk</em> instead of discarding, then hit a promoted chunk on the way
+    back up. <code>0 L2</code> finally becomes non-zero.</p>
+  </div>
+</section>
+
+<!-- ============================================================ 6 -->
+<section>
+  <h2><span class="num">6</span>Scope boundary</h2>
+  <p class="out">Explicitly <strong>out</strong>: real model weights · GPU / CUDA · attention · the two-process
+  split · ZMQ / shared memory · compression · <code>IsolatedLRU</code> and <code>cache_salt</code> · distributed
+  anything · CacheBlend.</p>
+  <blockquote class="warn">
+    <strong>On the process split.</strong> It is a core LMCache principle, but doing it now means drowning in
+    ZMQ before there is a cache to talk to. Build single-process with a <strong>clean seam</strong>:
+    <code>l1.py</code> never imports <code>engine.py</code>; they communicate only through explicit buffers and
+    keys. Then the split is an optional Stage 6, not a rewrite.
+  </blockquote>
+</section>
+
+<!-- ============================================================ 7 -->
+<section>
+  <h2><span class="num">7</span>The rule that keeps this honest</h2>
+  <p><strong>Every stage needs an assertion that can fail.</strong></p>
+  <p>A toy written from scratch will happily encode my misconceptions and run green forever — building a mirror
+  and calling it a microscope. The defence is that reality gets a vote at each stage:</p>
+  <ul>
+    <li><strong>Stage 2</strong> — round-trip equality after gather/scatter. Has one naturally.</li>
+    <li><strong>Stage 3</strong> — verify retrieved KV equals what was stored.</li>
+    <li><strong>Stage 4</strong> — <em>predict which key dies before running</em>, then check.</li>
+    <li><strong>Stage 5</strong> — a chunk demoted to disk and promoted back must be byte-identical.</li>
+  </ul>
+  <blockquote>
+    Everything genuinely learned this year came from being contradicted: <code>NO_CUDA_EXT</code> did not mean
+    skip-CUDA; the venv rename was not harmless; the patch was not fine. Keep that mechanism alive here on
+    purpose.
+  </blockquote>
+</section>
+
+<!-- ============================================================ 8 -->
+<section>
+  <h2><span class="num">8</span>Open decision</h2>
+  <p><strong>Real tokenizer or toy?</strong> Leaning real — <code>facebook/opt-125m</code>'s tokenizer is already
+  downloaded, it is a few MB, and real tokenization reproduces the messy word-count &ne; token-count behaviour
+  that cost a calibration detour on Aug 28. A toy tokenizer hides exactly that.</p>
+  <p>Then pick small, printable dimensions for the fake pool — <code>num_layers</code>,
+  <code>block_size</code>, <code>num_kv_heads</code>, <code>head_dim</code> — numbers that can be eyeballed in a
+  terminal, not realistic ones.</p>
+</section>
+
+<footer>nano-lmcache · design v1 · pairs with September9-lmcache-eviction-concepts.html and
+August28-lmcache-mp-mode-cpu-experiments.html</footer>
+
+</div>
+</body>
+</html>
