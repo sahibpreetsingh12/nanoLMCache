@@ -86,6 +86,7 @@ class BlockAllocator:
         """
         if n > len(self._free):
             raise OutOfBlocks(f"requested {n} blocks, only {len(self._free)} free")
+        # it is essentially slicing the front of a list.
         block_ids = [self._free.pop(0) for _ in range(n)]
         self._used.update(block_ids)
         return block_ids
@@ -107,3 +108,36 @@ class BlockAllocator:
                 raise ValueError(f"block {block_id} is not allocated")
             self._used.remove(block_id)
             self._free.append(block_id)
+
+
+
+def fake_prefill(
+    pool: torch.Tensor, block_table: list[int], token_ids: list[int]
+) -> None:
+    """
+    Write made-up KV into this request's blocks.
+
+    Stands in for a real forward pass. Every slot for token i gets i's token id,
+    so a later gather/scatter round trip can be checked exactly.
+
+    The only per-token work is deciding *where* a token lives. With block_size
+    tokens per block, position i in the sequence maps to:
+
+        block_table[i // block_size]   which block
+        i %  block_size                which slot inside it
+
+    That pair -- integer divide for the block, remainder for the slot -- is how
+    a paged engine turns a token position into an address.
+    """
+    block_size = pool.shape[3]
+    capacity = len(block_table) * block_size
+    if len(token_ids) > capacity:
+        raise ValueError(
+            f"{len(token_ids)} tokens need more than {len(block_table)} blocks "
+            f"(capacity {capacity})"
+        )
+
+    for i, tok in enumerate(token_ids):
+        block_id = block_table[i // block_size]
+        slot = i % block_size
+        pool[:, :, block_id, slot, :, :] = tok
