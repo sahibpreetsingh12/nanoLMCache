@@ -132,7 +132,7 @@ def fake_prefill(
     block_size = pool.shape[3]
     capacity = len(block_table) * block_size
     if len(token_ids) > capacity:
-        
+
         raise ValueError(
             f"{len(token_ids)} tokens need more than {len(block_table)} blocks "
             f"(capacity {capacity})"
@@ -142,3 +142,5 @@ def fake_prefill(
         block_id = block_table[i // block_size]
         slot = i % block_size
         pool[:, :, block_id, slot, :, :] = tok
+
+# next to work transfer.py (gather only)
