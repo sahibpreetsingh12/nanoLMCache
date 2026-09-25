@@ -14,7 +14,6 @@ The buffer drops the block and slot axes in favour of a single token axis:
     buffer  [layers, 2,        num_tokens,      heads, head_dim]
 
 Q - Why a buffer can be written to L1 and a pool region cannot:
-
   Not contiguous.  A request's tokens sit in blocks [10, 14, 5, 1], interleaved
                    with other requests' blocks. There is no single slice of the
                    pool that is "this request's KV" -- reading it means visiting
