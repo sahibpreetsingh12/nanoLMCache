@@ -143,4 +143,3 @@ def fake_prefill(
         slot = i % block_size
         pool[:, :, block_id, slot, :, :] = tok
 
-# next to work transfer.py (gather only)

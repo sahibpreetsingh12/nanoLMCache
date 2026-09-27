@@ -65,6 +65,7 @@ def chunk_tokens(
     complete would collide with the same token range in a longer prompt.
     """
     end = len(tokens) if save_unfull_chunk else len(tokens) - len(tokens) % chunk_size
+    print(end)
     for i in range(0, end, chunk_size):
         yield tokens[i : i + chunk_size]
 
