@@ -117,17 +117,17 @@ class L1Cache:
 
         old = self._store.get(key)
         """
-        # "What _usage_bytes would become if this put succeeds": what we hold,
-        # plus what is arriving, minus what it displaces. A dict replaces on a
-        # repeat key rather than appending, so a re-put displaces exactly one
-        # buffer -- hence the third term, zero when the key is new.
-        #
-        # A named variable rather than inline arithmetic, for two reasons.
-        # It is computed before anything mutates, so the reject below is a true
-        # no-op -- no store write to roll back. And the commit line reuses it
-        # instead of recomputing, so the number that was checked is the number
-        # that gets stored; there is no second expression to drift out of step
-        # with this one.
+        What _usage_bytes would become if this put succeeds": what we hold,
+        plus what is arriving, minus what it displaces. A dict replaces on a
+        repeat key rather than appending, so a re-put displaces exactly one
+        buffer -- hence the third term, zero when the key is new.
+        
+        A named variable rather than inline arithmetic, for two reasons.
+        It is computed before anything mutates, so the reject below is a true
+        no-op -- no store write to roll back. And the commit line reuses it
+        instead of recomputing, so the number that was checked is the number
+        that gets stored; there is no second expression to drift out of step
+        with this one.
         """
         projected = self._usage_bytes + nbytes - (buffer_bytes(old) if old is not None else 0)
         if projected > self.capacity_bytes:
