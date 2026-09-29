@@ -54,6 +54,8 @@ class RequestResult:
 
     num_tokens: int
     block_table: list[int]
+    """ so we can have a request with necessary blocks like num_tokens, 
+    block table but chunks can be empty if the request is not processed yet. """
     chunks: list[ChunkResult] = field(default_factory=list)
 
     @property
