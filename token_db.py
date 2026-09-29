@@ -65,7 +65,6 @@ def chunk_tokens(
     complete would collide with the same token range in a longer prompt.
     """
     end = len(tokens) if save_unfull_chunk else len(tokens) - len(tokens) % chunk_size
-    print(end)
     for i in range(0, end, chunk_size):
         yield tokens[i : i + chunk_size]
 
@@ -94,38 +93,3 @@ def process_tokens(
         start = chunk_id * chunk_size
         end = start + len(chunks[chunk_id])
         yield start, end, key
-
-
-if __name__ == "__main__":
-    # Smoke tests with synthetic tokens — no tokenizer, no network.
-
-    def show(label, tokens, **kw):
-        print(label)
-        keys = []
-        for start, end, key in process_tokens(tokens, **kw):
-            print(f"  [{start:4d}:{end:4d}]  {key:#018x}")
-            keys.append(key)
-        if not keys:
-            print("  (no complete chunks)")
-        return keys
-
-    # 1. Truncation: 641 tokens -> 2 chunks, trailing 129 dropped.
-    a = show("1. 641 tokens, save_unfull_chunk=False", list(range(641)))
-
-    # 2. Determinism: same tokens, same keys. Re-run the process to prove
-    #    these survive PYTHONHASHSEED randomisation.
-    b = show("\n2. same 641 tokens again", list(range(641)))
-    print(f"   identical: {a == b}")
-
-    # 3. Shared prefix, diverging tail — divergence placed inside a COMPLETE
-    #    chunk (token 600 lives in chunk 2, which spans 512:768).
-    base = list(range(768))
-    forked = base[:600] + list(range(9000, 9168))
-    c = show("\n3a. base, 768 tokens", base)
-    d = show("3b. same first 600 tokens, different after", forked)
-    print(f"   chunk 0 match: {c[0] == d[0]}")
-    print(f"   chunk 1 match: {c[1] == d[1]}")
-    print(f"   chunk 2 match: {c[2] == d[2]}   <- divergence lands here")
-
-    # 4. Under one chunk: nothing cacheable.
-    show("\n4. 200 tokens (under chunk_size)", list(range(200)))
