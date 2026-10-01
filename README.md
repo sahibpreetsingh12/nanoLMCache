@@ -20,6 +20,7 @@ before are restored from cache, the rest is prefilled and stored.
 - [ ] **Stage 4** — eviction: watermark, ratio, LRU
 - [ ] **Stage 5** — L2 disk tier
 
+
 **Next:** `eviction.py` — LRU victim selection, and a watermark loop that
 decides when to run it.
 
