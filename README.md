@@ -28,20 +28,10 @@ prefix-based chunking, paged KV storage, gather/scatter between tiers, and
 
 _(video goes here — see the comment in this file's source)_
 
-Three minutes, no narration: one prompt on a **miss**, the next turn on a
-**hit**, with a compute meter showing exactly what the hit skips. Built from
-[`demos/kv_cache_video.py`](demos/kv_cache_video.py) in both dark and light:
-
-```bash
-source .venv/bin/activate
-pip install manim                     # needs: brew install cairo pango pkg-config
-./demos/render_kv_video.sh            # -> demos/out/kv_cache_{dark,light}.mp4
-```
 
 ---
 
-## Three ideas worth the whole project
-
+## Three Key ideas 
 **Keys are chained.** A chunk's key is hashed together with the key of
 everything before it, so two prompts sharing their first N chunks produce the
 same first N keys — and diverge from N+1 onward. That single fact is why cache
@@ -58,7 +48,7 @@ that can waste up to 255 tokens of recomputation on every request.
 
 ---
 
-## Try it
+## Try Yourself
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -144,7 +134,7 @@ before are restored from cache, the rest is prefilled and stored.
 - [ ] **Stage 4** — eviction: watermark, ratio, LRU
 - [ ] **Stage 5** — L2 disk tier
 
-**Next:** finish `tests/test_transfer.py` (2 of 4 tests written), then
+**Next:** Working on `tests/test_transfer.py` (2 of 4 tests written), then
 `eviction.py` — LRU victim selection, and a watermark loop that decides when to
 run it.
 
@@ -155,10 +145,4 @@ makes "cold" mean *demoted* rather than *deleted*.
 
 ---
 
-## Scope
 
-Deliberately out: real model weights, GPU/CUDA, attention, the two-process
-split, ZMQ/shared memory, compression, distributed anything.
-
-Built alongside contributing to LMCache and SGLang. The toy exists to make the
-real thing legible.
