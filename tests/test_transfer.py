@@ -152,3 +152,51 @@ def test_gather_matches_expected():
     num_layers, two, _, _, num_kv_heads, head_dim = pool.shape
     assert got.shape == (num_layers, two, num_tokens, num_kv_heads, head_dim)
     assert torch.equal(got, expected_buffer(pool, num_tokens))
+
+
+def test_gather_stops_at_num_tokens():
+    """
+    gather reads exactly num_tokens, not everything the blocks could hold.
+
+    A request's last block is almost always partly empty -- 14 tokens reserve
+    4 blocks of 4 and leave 2 slots over -- and this is the whole reason
+    num_tokens is a parameter instead of len(block_table) * block_size. The
+    block table says how much space was *reserved*; only the caller knows how
+    much of it holds this request's KV.
+
+    Reading the spare slots would not crash. engine.BlockAllocator.free()
+    deliberately does not zero a block's contents, so in a running system those
+    two slots hold whatever the previous tenant left behind. A gather that read
+    them would hand L1 a buffer with two tokens of someone else's KV glued to
+    the end, stored under a key that claims to describe 14 tokens. The cache
+    would then serve that as a hit. Nothing would raise; the output would just
+    be quietly wrong.
+
+    Here the pool starts zeroed and nothing has been freed into it, so those
+    slots are 0.0 -- which the last assert turns into a tripwire.
+    """
+    pool = make_pool()
+    block_size = pool.shape[3]
+
+    num_blocks = 4
+    num_tokens = num_blocks * block_size - 2  # 14 tokens in 16 slots
+    block_table = BlockAllocator().allocate(num_blocks)
+
+    fill_distinct(pool, block_table, num_tokens)
+
+    # Premise: the last two slots of the final block really were left untouched.
+    tail = pool[:, :, block_table[-1], num_tokens % block_size :]
+    assert torch.equal(tail, torch.zeros_like(tail)), (
+        "fill_distinct wrote past num_tokens; this test is testing the wrong thing"
+    )
+
+    got = gather(pool, block_table, num_tokens)
+
+    assert got.shape[2] == num_tokens
+    assert torch.equal(got, expected_buffer(pool, num_tokens))
+
+    # _slab starts every token at STRIDE, so no number it writes is ever 0.
+    # A zero in the buffer can therefore only have come from a slot nobody
+    # wrote -- which is exactly the symptom of a gather that ignored
+    # num_tokens and read the blocks to capacity.
+    assert (got != 0).all(), "buffer contains an unwritten slot"
