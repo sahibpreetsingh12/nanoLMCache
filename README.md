@@ -9,20 +9,52 @@ prefix-based chunking, paged KV storage, gather/scatter between tiers, and
 
 ---
 
-## Where I am
+## Watch it
 
-**Stage 3 of 5 — working cache.** A prompt goes in, chunks that were seen
-before are restored from cache, the rest is prefilled and stored.
+<!--
+  Replace the line below with a GitHub attachment URL, on its own line:
 
-- [x] **Stage 1** — prompt → tokens → chunks → chained prefix keys
-- [x] **Stage 2** — paged L0 pool, gather/scatter round trip
-- [x] **Stage 3** — L1 store + the hit/miss branch
-- [ ] **Stage 4** — eviction: watermark, ratio, LRU
-- [ ] **Stage 5** — L2 disk tier
+    1. Open a new issue on this repo (you will NOT submit it)
+    2. Drag demos/out/kv_cache_dark.mp4 into the comment box and wait for upload
+    3. Copy the https://github.com/user-attachments/assets/... URL it inserts
+    4. Paste it below as a BARE line — no markdown link, no image syntax
+    5. Close the issue tab without submitting
 
+  A bare user-attachments URL renders as an inline player. A ![](...) or a
+  YouTube link will not — GitHub README markdown cannot embed an iframe.
+  Attachments are size-capped (~10MB for video), so render at -qm rather than
+  -qh if the file is too large.
+-->
 
-**Next:** `eviction.py` — LRU victim selection, and a watermark loop that
-decides when to run it.
+_(video goes here — see the comment in this file's source)_
+
+Three minutes, no narration: one prompt on a **miss**, the next turn on a
+**hit**, with a compute meter showing exactly what the hit skips. Built from
+[`demos/kv_cache_video.py`](demos/kv_cache_video.py) in both dark and light:
+
+```bash
+source .venv/bin/activate
+pip install manim                     # needs: brew install cairo pango pkg-config
+./demos/render_kv_video.sh            # -> demos/out/kv_cache_{dark,light}.mp4
+```
+
+---
+
+## Three ideas worth the whole project
+
+**Keys are chained.** A chunk's key is hashed together with the key of
+everything before it, so two prompts sharing their first N chunks produce the
+same first N keys — and diverge from N+1 onward. That single fact is why cache
+reuse is always a *prefix*, never a middle match.
+
+**A cache entry cannot contain an address.** KV lives in scattered blocks whose
+IDs are on loan from the allocator. `gather` throws those addresses away and
+produces a flat buffer, which is what makes the entry storable, hashable, and
+restorable into completely different blocks later.
+
+**Complete chunks only.** A trailing partial chunk is dropped — it still gets
+prefilled and still occupies L0, it just never gets a key. With `chunk_size=256`
+that can waste up to 255 tokens of recomputation on every request.
 
 ---
 
@@ -56,7 +88,7 @@ SUMMARY
   L0  1024 of 1024 blocks free, pool is 2048 KB
 ```
 
-Tests: `pytest tests/ -q` — 27 passing, offline, no network.
+Tests: `pytest tests/ -q` — 29 passing, offline, no network.
 
 ---
 
@@ -97,24 +129,29 @@ Tests: `pytest tests/ -q` — 27 passing, offline, no network.
 | `l1.py` | content-addressed buffer store with a byte budget |
 | `cache.py` | the orchestrator — the hit/miss branch |
 | `nano-lmcache-run.py` | interactive driver with stats |
+| `demos/` | the animation, and the chunking walkthrough |
 
 ---
 
-## Three ideas worth the whole project
+## Where I am
 
-**Keys are chained.** A chunk's key is hashed together with the key of
-everything before it, so two prompts sharing their first N chunks produce the
-same first N keys — and diverge from N+1 onward. That single fact is why cache
-reuse is always a *prefix*, never a middle match.
+**Stage 3 of 5 — working cache.** A prompt goes in, chunks that were seen
+before are restored from cache, the rest is prefilled and stored.
 
-**A cache entry cannot contain an address.** KV lives in scattered blocks whose
-IDs are on loan from the allocator. `gather` throws those addresses away and
-produces a flat buffer, which is what makes the entry storable, hashable, and
-restorable into completely different blocks later.
+- [x] **Stage 1** — prompt → tokens → chunks → chained prefix keys
+- [x] **Stage 2** — paged L0 pool, gather/scatter round trip
+- [x] **Stage 3** — L1 store + the hit/miss branch
+- [ ] **Stage 4** — eviction: watermark, ratio, LRU
+- [ ] **Stage 5** — L2 disk tier
 
-**Complete chunks only.** A trailing partial chunk is dropped — it still gets
-prefilled and still occupies L0, it just never gets a key. With `chunk_size=256`
-that can waste up to 255 tokens of recomputation on every request.
+**Next:** finish `tests/test_transfer.py` (2 of 4 tests written), then
+`eviction.py` — LRU victim selection, and a watermark loop that decides when to
+run it.
+
+Until Stage 4 lands there is no notion of hot or cold here: a full `L1Cache.put`
+refuses the new entry rather than evicting an old one, so the cache never has to
+ask which entry is coldest. LRU is what creates that answer; the L2 tier is what
+makes "cold" mean *demoted* rather than *deleted*.
 
 ---
 
