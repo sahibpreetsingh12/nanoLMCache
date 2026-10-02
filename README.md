@@ -11,23 +11,19 @@ prefix-based chunking, paged KV storage, gather/scatter between tiers, and
 
 ## Watch it
 
-<!--
-  Replace the line below with a GitHub attachment URL, on its own line:
+[![nanoLMCache: a KV cache miss and hit, step by step](https://img.youtube.com/vi/b0UtqyMBpQI/maxresdefault.jpg)](https://youtu.be/b0UtqyMBpQI)
 
-    1. Open a new issue on this repo (you will NOT submit it)
-    2. Drag demos/out/kv_cache_dark.mp4 into the comment box and wait for upload
-    3. Copy the https://github.com/user-attachments/assets/... URL it inserts
-    4. Paste it below as a BARE line — no markdown link, no image syntax
-    5. Close the issue tab without submitting
+Three minutes, no narration. One prompt on a **miss**, the next turn on a
+**hit**, with a compute meter showing exactly what the hit skips.
 
-  A bare user-attachments URL renders as an inline player. A ![](...) or a
-  YouTube link will not — GitHub README markdown cannot embed an iframe.
-  Attachments are size-capped (~10MB for video), so render at -qm rather than
-  -qh if the file is too large.
--->
+Built from [`demos/kv_cache_video.py`](demos/kv_cache_video.py), in dark and
+light:
 
-_(video goes here — see the comment in this file's source)_
-
+```bash
+source .venv/bin/activate
+pip install manim                     # needs: brew install cairo pango pkg-config
+./demos/render_kv_video.sh            # -> demos/out/kv_cache_{dark,light}.mp4
+```
 
 ---
 
