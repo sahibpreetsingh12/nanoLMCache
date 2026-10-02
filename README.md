@@ -11,27 +11,40 @@ prefix-based chunking, paged KV storage, gather/scatter between tiers, and
 
 ## Watch it
 
-[![nanoLMCache: a KV cache miss and hit, step by step](https://img.youtube.com/vi/b0UtqyMBpQI/maxresdefault.jpg)](https://youtu.be/b0UtqyMBpQI)
+![a KV cache entry being gathered out of one set of blocks and scattered into another](demos/kv_cache_loop.gif)
 
-Three minutes, no narration. One prompt on a **miss**, the next turn on a
-**hit**, with a compute meter showing exactly what the hit skips.
+I could not picture what a cache hit actually saves, so I animated it.
 
-Built from [`demos/kv_cache_video.py`](demos/kv_cache_video.py), in dark and
-light:
+Above is the fourteen-second version of the one idea this whole project is
+about. The KV gets computed into blocks `[11, 3]`, gathered into a flat buffer,
+and stored under a key made from the tokens. Then the request ends and those
+blocks go straight back on the free list. When the same tokens turn up again,
+the KV comes back — into blocks `[5, 9]`, which did not belong to anyone when it
+was stored. Same numbers, new addresses.
+
+The full walkthrough is three minutes, no voiceover: the same conversation run
+twice, with a meter that fills all the way the first time and never moves the
+second.
+
+[![the full three-minute walkthrough](https://img.youtube.com/vi/b0UtqyMBpQI/maxresdefault.jpg)](https://youtu.be/b0UtqyMBpQI)
+
+Both are rendered with Manim, in dark and light:
 
 ```bash
 source .venv/bin/activate
-pip install manim                     # needs: brew install cairo pango pkg-config
-./demos/render_kv_video.sh            # -> demos/out/kv_cache_{dark,light}.mp4
+pip install manim                 # needs: brew install cairo pango pkg-config
+
+./demos/render_kv_video.sh        # the full video -> demos/out/
+python demos/make_gif.py          # the loop above  -> demos/kv_cache_loop.gif
 ```
 
 ---
 
 ## The three tiers
 
-Everything here is named after *where the KV lives*. These names come from
-LMCache and are not universal, so they are worth pinning down before reading any
-code.
+L0, L1 and L2 are LMCache's names and I kept them. They cost me more time than
+they should have, so here is what I wish someone had put in front of me first:
+every one of them is named after *where the KV lives*.
 
 | | What it is | Lives in | Addressed by | Survives the request? |
 |---|---|---|---|---|
@@ -39,10 +52,10 @@ code.
 | **L1** | the cache's own memory | CPU RAM (here: a dict) | **content key** — a hash of the tokens | **Yes** |
 | **L2** | the cold tier *(Stage 5, not built yet)* | disk | content key | Yes, and across restarts |
 
-The step from L0 to L1 is the one that matters, and it is a change of
-**addressing scheme**, not just a copy. L0 answers *"which block?"*. L1 answers
-*"which tokens?"*. `gather` and `scatter` are the translation between the two —
-which is the second of the three ideas below.
+The step from L0 to L1 is the one that took me longest, because it is not a
+copy — it is a change of address. L0 answers *"which block?"*. L1 answers
+*"which tokens?"*. `gather` and `scatter` are the translation between the two,
+which is the second idea below.
 
 ---
 
@@ -125,27 +138,26 @@ Tests: `pytest tests/ -q` — 29 passing, offline, no network.
 
 ## How to read this repo
 
-GitHub lists files alphabetically, which here is almost exactly backwards:
-`cache.py` depends on everything, `tokenizer.py` depends on nothing. Read them
-in this order instead.
-
-Every file opens with a long module docstring explaining *why* it is shaped the
-way it is. Those docstrings are the real writing in this repo — the code itself
-is short.
+If you want to read the code, don't go alphabetically. GitHub puts `cache.py`
+first and that is the file I would read last, because it depends on every other
+one. I would go in this order:
 
 | # | File | What to look for |
 |---|---|---|
 | 1 | [`tokenizer.py`](tokenizer.py) | The smallest file. A real HF tokenizer, deliberately not a toy — word count ≠ token count, and that is what makes chunk boundaries land in unintuitive places. |
-| 2 | [`token_db.py`](token_db.py) | Chunking, and the **chained** prefix hash. Idea #1. Convince yourself why chunk 3's key depends on chunks 1 and 2. |
-| 3 | [`engine.py`](engine.py) | **L0.** The 6-axis pool shape, and why a *block* is the unit of copying. A block ID is a position, not a slab: block 7 exists in every layer and for both K and V. |
-| 4 | [`transfer.py`](transfer.py) | `gather` / `scatter`. The best docstring here — four reasons a cache entry cannot hold an address. Idea #2. |
-| 5 | [`l1.py`](l1.py) | **L1.** A dict with a byte budget. Note everything it deliberately does *not* do: no eviction, no hit stats, no hashing. |
-| 6 | [`cache.py`](cache.py) | The orchestrator — the only file that knows what order the others go in, and the only place the HIT/MISS branch appears. **Read it last.** |
+| 2 | [`token_db.py`](token_db.py) | Chunking, and the **chained** prefix hash. Idea #1. Work out for yourself why chunk 3's key depends on chunks 1 and 2 — that is the whole reason reuse is always a prefix. |
+| 3 | [`engine.py`](engine.py) | **L0.** The six-axis pool shape, and why a *block* is the unit of copying. The bit that took me a moment: a block ID is a position, not a slab. Block 7 exists in every layer and for both K and V. |
+| 4 | [`transfer.py`](transfer.py) | `gather` / `scatter`. My favourite docstring in here — four reasons a cache entry cannot hold an address. Idea #2. |
+| 5 | [`l1.py`](l1.py) | **L1.** A dict with a byte budget. Worth noticing what it deliberately does *not* do: no eviction, no hit stats, no hashing. |
+| 6 | [`cache.py`](cache.py) | The orchestrator. The only file that knows what order the others go in, and the only place the HIT/MISS branch lives. I would read it last. |
 | 7 | [`run.py`](run.py) | Drive it yourself: multi-turn, with hit/miss stats. |
-| 8 | [`tests/`](tests/) | What each piece has to guarantee. `test_transfer.py` is worth reading for *why* its fixture exists at all. |
+| 8 | [`tests/`](tests/) | What each piece has to guarantee. `test_transfer.py` is worth reading for *why* its fixture exists — the obvious version of that test could not have failed. |
 
-Also here: [`demos/`](demos/) — the animation above, plus a chunking
-walkthrough. [`extras/`](extras/) — early design notes, kept for the record and
+Most of what I learned is in the module docstrings rather than the code. The
+code is short; the reasoning is not.
+
+Also in here: [`demos/`](demos/) — the animation above, plus a chunking
+walkthrough. [`extras/`](extras/) — early design notes I kept for the record,
 not part of the project.
 
 ---
@@ -165,10 +177,11 @@ before are restored from cache, the rest is prefilled and stored.
 `eviction.py` — LRU victim selection, and a watermark loop that decides when to
 run it.
 
-Until Stage 4 lands there is no notion of hot or cold here: a full `L1Cache.put`
-refuses the new entry rather than evicting an old one, so the cache never has to
-ask which entry is coldest. LRU is what creates that answer; the L2 tier is what
-makes "cold" mean *demoted* rather than *deleted*.
+There is no hot or cold in here yet, and I would rather say why than let it
+look like something I forgot. When L1 is full, `put()` refuses the new entry
+instead of throwing out an old one — so the cache never reaches the moment where
+it has to ask which entry is coldest. LRU is what creates that answer. L2 is
+what makes "cold" mean *demoted* rather than *deleted*.
 
 ---
 

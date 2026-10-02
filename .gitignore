@@ -3,5 +3,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 media/
-demos/
 demos/out/
+.DS_Store
+demos/kv_cache_video.py
+demos/make_gif.py
+demos/render_kv_video.sh
