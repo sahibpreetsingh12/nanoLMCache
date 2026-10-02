@@ -31,6 +31,25 @@ _(video goes here — see the comment in this file's source)_
 
 ---
 
+## The three tiers
+
+Everything here is named after *where the KV lives*. These names come from
+LMCache and are not universal, so they are worth pinning down before reading any
+code.
+
+| | What it is | Lives in | Addressed by | Survives the request? |
+|---|---|---|---|---|
+| **L0** | the engine's own KV pool, carved into fixed-size blocks | GPU memory (here: one torch tensor) | **block ID** — a position in the pool | **No.** Blocks go back on the free list |
+| **L1** | the cache's own memory | CPU RAM (here: a dict) | **content key** — a hash of the tokens | **Yes** |
+| **L2** | the cold tier *(Stage 5, not built yet)* | disk | content key | Yes, and across restarts |
+
+The step from L0 to L1 is the one that matters, and it is a change of
+**addressing scheme**, not just a copy. L0 answers *"which block?"*. L1 answers
+*"which tokens?"*. `gather` and `scatter` are the translation between the two —
+which is the second of the three ideas below.
+
+---
+
 ## Three Key ideas 
 **Keys are chained.** A chunk's key is hashed together with the key of
 everything before it, so two prompts sharing their first N chunks produce the
@@ -54,7 +73,7 @@ that can waste up to 255 tokens of recomputation on every request.
 python -m venv .venv && source .venv/bin/activate
 pip install torch transformers pytest
 
-python nano-lmcache-run.py --chunk 64
+python run.py --chunk 64
 ```
 
 It asks how many turns, then reads that many prompts. Each turn appends to the
@@ -108,18 +127,30 @@ Tests: `pytest tests/ -q` — 29 passing, offline, no network.
 
 ---
 
-## Modules
+## How to read this repo
 
-| File | What it does |
-|---|---|
-| `tokenizer.py` | prompt ↔ token IDs (real HF tokenizer, `facebook/opt-125m`) |
-| `token_db.py` | chunking + chained prefix hashing → cache keys |
-| `engine.py` | the L0 paged pool, block allocator, fake prefill |
-| `transfer.py` | `gather` (blocks → flat buffer), `scatter` (buffer → blocks) |
-| `l1.py` | content-addressed buffer store with a byte budget |
-| `cache.py` | the orchestrator — the hit/miss branch |
-| `nano-lmcache-run.py` | interactive driver with stats |
-| `demos/` | the animation, and the chunking walkthrough |
+GitHub lists files alphabetically, which here is almost exactly backwards:
+`cache.py` depends on everything, `tokenizer.py` depends on nothing. Read them
+in this order instead.
+
+Every file opens with a long module docstring explaining *why* it is shaped the
+way it is. Those docstrings are the real writing in this repo — the code itself
+is short.
+
+| # | File | What to look for |
+|---|---|---|
+| 1 | [`tokenizer.py`](tokenizer.py) | The smallest file. A real HF tokenizer, deliberately not a toy — word count ≠ token count, and that is what makes chunk boundaries land in unintuitive places. |
+| 2 | [`token_db.py`](token_db.py) | Chunking, and the **chained** prefix hash. Idea #1. Convince yourself why chunk 3's key depends on chunks 1 and 2. |
+| 3 | [`engine.py`](engine.py) | **L0.** The 6-axis pool shape, and why a *block* is the unit of copying. A block ID is a position, not a slab: block 7 exists in every layer and for both K and V. |
+| 4 | [`transfer.py`](transfer.py) | `gather` / `scatter`. The best docstring here — four reasons a cache entry cannot hold an address. Idea #2. |
+| 5 | [`l1.py`](l1.py) | **L1.** A dict with a byte budget. Note everything it deliberately does *not* do: no eviction, no hit stats, no hashing. |
+| 6 | [`cache.py`](cache.py) | The orchestrator — the only file that knows what order the others go in, and the only place the HIT/MISS branch appears. **Read it last.** |
+| 7 | [`run.py`](run.py) | Drive it yourself: multi-turn, with hit/miss stats. |
+| 8 | [`tests/`](tests/) | What each piece has to guarantee. `test_transfer.py` is worth reading for *why* its fixture exists at all. |
+
+Also here: [`demos/`](demos/) — the animation above, plus a chunking
+walkthrough. [`extras/`](extras/) — early design notes, kept for the record and
+not part of the project.
 
 ---
 

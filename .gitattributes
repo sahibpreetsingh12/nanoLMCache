@@ -1,0 +1,4 @@
+# Keep the language bar honest. extras/ is reference material I keep around,
+# not part of the project, and a single HTML file there was reporting as 23%
+# of the repo.
+extras/** linguist-documentation
