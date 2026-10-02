@@ -13,22 +13,18 @@ prefix-based chunking, paged KV storage, gather/scatter between tiers, and
 
 ![a KV cache entry being gathered out of one set of blocks and scattered into another](demos/kv_cache_loop.gif)
 
-I could not picture what a cache hit actually saves, so I animated it.
-
-Above is the fourteen-second version of the one idea this whole project is
+This is just the fourteen-second version of the one idea this whole project is
 about. The KV gets computed into blocks `[11, 3]`, gathered into a flat buffer,
 and stored under a key made from the tokens. Then the request ends and those
 blocks go straight back on the free list. When the same tokens turn up again,
 the KV comes back — into blocks `[5, 9]`, which did not belong to anyone when it
 was stored. Same numbers, new addresses.
 
-The full walkthrough is three minutes, no voiceover: the same conversation run
-twice, with a meter that fills all the way the first time and never moves the
-second.
+The full walkthrough is three minutes.
 
 [![the full three-minute walkthrough](https://img.youtube.com/vi/b0UtqyMBpQI/maxresdefault.jpg)](https://youtu.be/b0UtqyMBpQI)
 
-Both are rendered with Manim, in dark and light:
+
 
 ```bash
 source .venv/bin/activate
