@@ -179,6 +179,4 @@ instead of throwing out an old one — so the cache never reaches the moment whe
 it has to ask which entry is coldest. LRU is what creates that answer. L2 is
 what makes "cold" mean *demoted* rather than *deleted*.
 
----
-
-
+--
