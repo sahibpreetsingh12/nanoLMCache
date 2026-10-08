@@ -24,16 +24,6 @@ The full walkthrough is three minutes.
 
 [![the full three-minute walkthrough](https://img.youtube.com/vi/b0UtqyMBpQI/maxresdefault.jpg)](https://youtu.be/b0UtqyMBpQI)
 
-
-
-```bash
-source .venv/bin/activate
-pip install manim                 # needs: brew install cairo pango pkg-config
-
-./demos/render_kv_video.sh        # the full video -> demos/out/
-python demos/make_gif.py          # the loop above  -> demos/kv_cache_loop.gif
-```
-
 ---
 
 ## The three tiers
