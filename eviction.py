@@ -61,7 +61,8 @@ WHY A DICT IS IN THE PICTURE, AND WHY IT IS NOT ENOUGH
 This is not an analogy. It is the thing you reach for first, and the reason it
 fails is the reason this class exists.
 
-1.  L1's store already IS a dict, and dicts preserve insertion order since 3.7.
+1.  L1's store already IS a dict -- dict[int, torch.Tensor], 64-bit prefix hash
+    to gathered buffer -- and dicts preserve insertion order since 3.7.
     l1.keys() is documented as "keys in insertion order -- oldest first". So the
     first instinct is that LRU is already here for free: evict l1.keys()[0].
 
@@ -76,9 +77,11 @@ fails is the reason this class exists.
         d["a"] = 99        # assigning to an existing key does NOT move it
         list(d)            # ['a', 'b']  -- "a" is still first
 
-    So a dict gives you FIFO: oldest-inserted leaves first, no matter that it
-    was read on every single request. An entry written once and read forever is
-    the hottest thing in the cache, and FIFO evicts it first.
+    Concretely, with chunking: chunk 0 of every request is the system prompt.
+    It is hit by every conversation, so it is the most valuable entry in the
+    cache -- and it also missed first, so it sits at keys()[0] forever, because
+    nothing a dict does ever moves it. Evicting keys()[0] throws away the system
+    prompt first, every time. That is not a corner case, it is the normal case.
 
 3.  You can force the move by hand -- del d[k] then d[k] = v puts it at the
     back. But now recording a READ means writing to L1's store, and l1.py is
@@ -88,9 +91,19 @@ fails is the reason this class exists.
     buffer to get recorded.
 
 4.  So: a second structure, holding keys only, ordered by use instead of by
-    insertion. collections.OrderedDict is a dict that also exposes
-    move_to_end(), which is step 3 done properly and in O(1). That one method
-    is the entire reason to prefer it over a plain dict here.
+    insertion. Three candidates, and only one is both correct and fast:
+
+                        touch an existing key        coldest()
+        dict            O(1) but WRONG, never moves  O(n)
+        list[int]       O(n), scan then shift        O(n)
+        OrderedDict     O(1) and correct             O(n)
+
+    A plain list would be correct -- remove(key) then append(key) -- but
+    remove() has to scan to find the key and then shift everything after it,
+    which puts O(n) on the one path that runs on every chunk of every request.
+    collections.OrderedDict is a dict plus a doubly linked list, so its
+    move_to_end() is four pointer writes no matter how many entries it holds.
+    That one method is the entire reason to prefer it here.
 
 5.  Its values are never read. This is an ordered SET of keys, and
     OrderedDict[int, None] is the cheapest way to say that with the standard
@@ -135,9 +148,10 @@ class LRUPolicy:
     """
 
     def __init__(self) -> None:
-        # TODO: self._order: OrderedDict[int, None] = OrderedDict()
-        #       Keys only. Front = coldest, back = most recently used.
-        raise NotImplementedError
+        # Keys only; the values are never read. Front = coldest, back = most
+        # recently used. An OrderedDict rather than a dict for move_to_end,
+        # and rather than a list because move_to_end is O(1) -- see point 4.
+        self._order: OrderedDict[int, None] = OrderedDict()
 
     def touch(self, key: int) -> None:
         """
@@ -145,16 +159,21 @@ class LRUPolicy:
 
         Called from cache.py in two places: after l1.put() returns True, and
         after l1.get() returns a buffer. Those are the only two events that
-        make an entry recent.
+        make an entry recent. Note "returns True" -- a put that did not fit was
+        not stored, and ranking a key L1 does not hold is the bug forget()
+        exists to clean up after.
 
-        One body has to cover both cases:
-            key is new        -> add it at the back
-            key already here  -> MOVE it to the back
+        Two lines, covering both cases with the same reasoning:
 
-        The second case is the one a plain dict gets wrong, so it is the one to
-        write deliberately. Two lines: insert, then move_to_end.
+            new key        the assignment appends at the back; move_to_end is
+                           then a no-op, which is cheaper than asking whether
+                           the key was already there.
+            existing key   the assignment keeps its ORIGINAL position -- this is
+                           the dict behaviour from point 2 -- and move_to_end is
+                           what actually does the work.
         """
-        raise NotImplementedError
+        self._order[key] = None
+        self._order.move_to_end(key)
 
     def forget(self, key: int) -> None:
         """
@@ -169,10 +188,12 @@ class LRUPolicy:
         gets False, and credits itself with bytes it never freed -- so the
         eviction loop stops while usage is still above the watermark.
 
-        Silent on a key it does not hold. The caller is telling us something is
-        gone; it being gone already is not an error. pop with a default.
+        Silent on a key it does not hold: the caller is telling us something is
+        gone, and it being gone already is not an error. Hence pop with a
+        default rather than del, and no return value -- there is nothing the
+        caller could usefully do differently either way.
         """
-        raise NotImplementedError
+        self._order.pop(key, None)
 
     def coldest(self) -> list[int]:
         """
@@ -191,12 +212,21 @@ class LRUPolicy:
         mutates the very OrderedDict being iterated. That is a RuntimeError. A
         snapshot makes the caller safe without the caller having to know, and a
         list of ints costs nothing next to the buffers being moved.
-
-        TODO: list(self._order) -- front is already coldest.
         """
-        raise NotImplementedError
+        return list(self._order)
+
+    def clear(self) -> None:
+        """
+        Forget everything. The partner to l1.clear(), which drops every entry
+        at once and would otherwise leave the whole ranking stale.
+        """
+        self._order.clear()
 
     def __repr__(self) -> str:
-        # TODO: entry count, plus the coldest key or two -- the numbers you
-        #       want in front of you when an eviction test fails.
-        raise NotImplementedError
+        if not self._order:
+            return "LRUPolicy(empty)"
+        order = self.coldest()
+        return (
+            f"LRUPolicy({len(order)} keys, "
+            f"coldest {order[0]}, hottest {order[-1]})"
+        )
