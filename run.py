@@ -10,7 +10,7 @@ Usage:
     python run.py                 chunk_size 256, block_size 16
     python run.py --chunk 64      smaller chunks, so short prompts still cache
     python run.py --no-accumulate each prompt stands alone
-    python run.py --chunk 16 --l1-kb 8   tiny L1, so eviction actually happens
+    python run.py --chunk 8 --block 4 --l1-kb 5   tiny L1, so eviction happens
 """
 
 import argparse
@@ -24,7 +24,7 @@ from l1 import L1Cache
 from tokenizer import encode
 
 NUM_BLOCKS = 1024
-L1_CAPACITY_BYTES = 50_000_000
+L1_CAPACITY_BYTES = 50 * 1024 * 1024  # 50 MB, binary to match the KB/MB display
 
 
 def parse_args():
@@ -43,6 +43,15 @@ def parse_args():
         help="treat each prompt as independent instead of appending to the chat",
     )
     return p.parse_args()
+
+
+def fmt_bytes(n: float) -> str:
+    """Bytes as B / KB / MB, so a 5 KB and a 50 MB L1 both read naturally."""
+    for unit in ("B", "KB"):
+        if n < 1024:
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} MB"
 
 
 def ask_int(prompt: str) -> int:
@@ -73,9 +82,9 @@ def main():
     print(f"\nnano-lmcache")
     print(f"  chunk_size {args.chunk}, block_size {args.block} "
           f"-> {args.chunk // args.block} blocks per chunk")
-    print(f"  L0 pool    {NUM_BLOCKS} blocks, {pool_bytes / 1024:.0f} KB, "
+    print(f"  L0 pool    {NUM_BLOCKS} blocks, {fmt_bytes(pool_bytes)}, "
           f"{NUM_BLOCKS * args.block} token slots")
-    print(f"  L1 budget  {l1.capacity_bytes / 1024:.1f} KB, evict at "
+    print(f"  L1 budget  {fmt_bytes(l1.capacity_bytes)}, evict at "
           f"{args.watermark:.0%}, free {args.ratio:.0%} each time")
     print(f"  mode       {'independent prompts' if args.no_accumulate else 'accumulating chat'}\n")
 
@@ -152,16 +161,16 @@ def report(turns, kv, allocator, pool_bytes, args):
     print(f"  never cacheable {uncached} tokens  (trailing partial chunks)")
 
     print(f"\n  L1  {kv.l1.num_entries} entries, "
-          f"{kv.l1.usage_bytes / 1024:.1f} KB of "
-          f"{kv.l1.capacity_bytes / 1024:.1f} KB  "
+          f"{fmt_bytes(kv.l1.usage_bytes)} of "
+          f"{fmt_bytes(kv.l1.capacity_bytes)}  "
           f"({kv.l1.usage_ratio:.2%} full)")
 
     print(f"      evicted {kv.controller.num_evictions} entries, "
-          f"{kv.controller.bytes_evicted / 1024:.1f} KB in total")
+          f"{fmt_bytes(kv.controller.bytes_evicted)} in total")
 
     used_blocks = NUM_BLOCKS - allocator.num_free
     print(f"  L0  {allocator.num_free} of {NUM_BLOCKS} blocks free "
-          f"({used_blocks} still held), pool is {pool_bytes / 1024:.0f} KB")
+          f"({used_blocks} still held), pool is {fmt_bytes(pool_bytes)}")
 
     if chunks and hits == 0:
         print("\n  no hits: turns shared no complete chunk. Try a longer prompt,")

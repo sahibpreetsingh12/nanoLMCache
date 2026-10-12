@@ -5,7 +5,7 @@ A minimal KV cache for LLM inference, built from scratch to understand how
 
 Not a clone and not a library — a small, complete implementation of the ideas:
 prefix-based chunking, paged KV storage, gather/scatter between tiers, and
-(soon) eviction. CPU-only, no GPU, no real model weights.
+LRU eviction. CPU-only, no GPU, no real model weights.
 
 ---
 
@@ -45,7 +45,7 @@ which is the second idea below.
 
 ---
 
-## Three Key ideas 
+## Four key ideas
 **Keys are chained.** A chunk's key is hashed together with the key of
 everything before it, so two prompts sharing their first N chunks produce the
 same first N keys — and diverge from N+1 onward. That single fact is why cache
@@ -60,6 +60,12 @@ restorable into completely different blocks later.
 prefilled and still occupies L0, it just never gets a key. With `chunk_size=256`
 that can waste up to 255 tokens of recomputation on every request.
 
+**LRU means last *used*, not first *added*.** A Python dict remembers insertion
+order, so "evict the first key" looks like free LRU. It is FIFO: the system
+prompt is chunk 0 of every request — the most-reused entry in the cache — and it
+was also stored first, so a dict would evict it first, every time. The policy
+needs its own ordering that moves a key to the back on every hit.
+
 ---
 
 ## Try Yourself
@@ -68,31 +74,46 @@ that can waste up to 255 tokens of recomputation on every request.
 python -m venv .venv && source .venv/bin/activate
 pip install torch transformers pytest
 
-python run.py --chunk 64
+python run.py --chunk 64                        # big L1: watch the hits
+python run.py --chunk 8 --block 4 --l1-kb 5     # tiny L1: watch eviction
 ```
 
 It asks how many turns, then reads that many prompts. Each turn appends to the
 conversation, so later turns share a prefix with earlier ones — which is where
-the reuse comes from.
+the reuse comes from. `--l1-kb` shrinks L1 until it has to throw things out;
+`--watermark` (default 0.9) and `--ratio` (default 0.2) set when and how much.
+`--chunk` must be a multiple of `--block`.
+
+The tiny-L1 run, third turn:
 
 ```
-turn 2/3 > What does the block table describe?
-   [    0:   64]  HIT   key 0xd2ad18ea5e2df168
-   102 tokens · 1 hit / 0 miss · 64 reused · 38 trailing uncached
+turn 3/3 >    [    0:    8]  HIT   key 0x89bbdb4fbaac3f0e
+   [    8:   16]  HIT   key 0x6d1ae76010e97747
+   [   16:   24]  HIT   key 0x6ce8c6ab50b3dcd1
+   [   24:   32]  MISS  key 0x2166c3edf3d76eeb
+   [   32:   40]  MISS  key 0xbe42bfb60e6a7b46
+   41 tokens · 3 hit / 2 miss · 24 reused · 1 trailing uncached
+   evicted               key 0x89bbdb4fbaac3f0e
+   L1 now 80% full after evicting 1 entries
 
 ==============================================================
 SUMMARY
 ==============================================================
-  chunks looked up     3
-    hits               2  (67%)
-    misses             1  (33%)
+  chunks looked up    10
+    hits               5  (50%)
+    misses             5  (50%)
 
-  prefill avoided 128 tokens  (42% of all tokens sent)
-  L1  1 entries, 8.0 KB of 50 MB  (0.02% full)
-  L0  1024 of 1024 blocks free, pool is 2048 KB
+  prefill avoided 40 tokens  (46% of all tokens sent)
+  L1  4 entries, 4.0 KB of 5.0 KB  (80.00% full)
+      evicted 1 entries, 1.0 KB in total
+  L0  1024 of 1024 blocks free (0 still held), pool is 512.0 KB
 ```
 
-Tests: `pytest tests/ -q` — 29 passing, offline, no network.
+Look at which key was evicted: `0x89bb…`, chunk 0, the one that had just been
+hit. Within a request the chunks are touched in order, so the first chunk ends
+up least recent. Plain LRU ranks by *when*, not by *how much depends on it*.
+
+Tests: `pytest tests/ -q` — 49 passing, offline, no network.
 
 ---
 
@@ -114,6 +135,13 @@ Tests: `pytest tests/ -q` — 29 passing, offline, no network.
                         │  gather(block_table)
                         ▼
                  contiguous buffer ──► l1.put(key, buffer)
+                                              │  policy.touch(key)   (hits touch too)
+                                              ▼
+                              controller.maybe_evict(): usage ≥ watermark?
+                                              │  yes
+                                              ▼
+                              policy.coldest() ──► l1.delete + policy.forget
+                              until ratio × capacity bytes are freed
 ```
 
 **L0** is the engine's own KV pool — small, fixed, freed when a request ends.
@@ -134,10 +162,12 @@ one. I would go in this order:
 | 2 | [`token_db.py`](token_db.py) | Chunking, and the **chained** prefix hash. Idea #1. Work out for yourself why chunk 3's key depends on chunks 1 and 2 — that is the whole reason reuse is always a prefix. |
 | 3 | [`engine.py`](engine.py) | **L0.** The six-axis pool shape, and why a *block* is the unit of copying. The bit that took me a moment: a block ID is a position, not a slab. Block 7 exists in every layer and for both K and V. |
 | 4 | [`transfer.py`](transfer.py) | `gather` / `scatter`. My favourite docstring in here — four reasons a cache entry cannot hold an address. Idea #2. |
-| 5 | [`l1.py`](l1.py) | **L1.** A dict with a byte budget. Worth noticing what it deliberately does *not* do: no eviction, no hit stats, no hashing. |
-| 6 | [`cache.py`](cache.py) | The orchestrator. The only file that knows what order the others go in, and the only place the HIT/MISS branch lives. I would read it last. |
-| 7 | [`run.py`](run.py) | Drive it yourself: multi-turn, with hit/miss stats. |
-| 8 | [`tests/`](tests/) | What each piece has to guarantee. `test_transfer.py` is worth reading for *why* its fixture exists — the obvious version of that test could not have failed. |
+| 5 | [`l1.py`](l1.py) | **L1.** A dict with a byte budget. Worth noticing what it deliberately does *not* do: no eviction (that is `controller.py`), no hit stats, no hashing. |
+| 6 | [`eviction.py`](eviction.py) | **WHICH** entry leaves. An ordering of keys by last use, nothing else — it never sees a byte or deletes anything. Idea #4, and why a plain dict is not enough. |
+| 7 | [`controller.py`](controller.py) | **WHEN** and **HOW MUCH**. Watermark check, byte budget, and the loop that walks the ranking and deletes. "The controller has the budget, the policy has the opinion." |
+| 8 | [`cache.py`](cache.py) | The orchestrator. The only file that knows what order the others go in, the only place the HIT/MISS branch lives, and the one that tells the policy what was used. I would read it last. |
+| 9 | [`run.py`](run.py) | Drive it yourself: multi-turn, with hit/miss and eviction stats. |
+| 10 | [`tests/`](tests/) | What each piece has to guarantee. `test_transfer.py` is worth reading for *why* its fixture exists — the obvious version of that test could not have failed. In `test_eviction.py`, every expected victim was written down before the code ran. |
 
 Most of what I learned is in the module docstrings rather than the code. The
 code is short; the reasoning is not.
@@ -150,23 +180,22 @@ not part of the project.
 
 ## Where I am
 
-**Stage 3 of 5 — working cache.** A prompt goes in, chunks that were seen
-before are restored from cache, the rest is prefilled and stored.
+**Stage 4 of 5 — working cache with eviction.** A prompt goes in, chunks that
+were seen before are restored from cache, the rest is prefilled and stored, and
+when L1 reaches its watermark the least recently used entries are thrown out.
 
 - [x] **Stage 1** — prompt → tokens → chunks → chained prefix keys
 - [x] **Stage 2** — paged L0 pool, gather/scatter round trip
 - [x] **Stage 3** — L1 store + the hit/miss branch
-- [ ] **Stage 4** — eviction: watermark, ratio, LRU
+- [x] **Stage 4** — eviction: watermark, ratio, LRU
 - [ ] **Stage 5** — L2 disk tier
 
-**Next:** Working on `tests/test_transfer.py` (2 of 4 tests written), then
-`eviction.py` — LRU victim selection, and a watermark loop that decides when to
-run it.
+**Next:** Stage 5, `l2.py` — evicted entries written to disk instead of
+discarded, and promoted back on a hit. Still open from Stage 2:
+`tests/test_transfer.py` has the two gather tests but not yet the scatter and
+round-trip ones.
 
-There is no hot or cold in here yet, and I would rather say why than let it
-look like something I forgot. When L1 is full, `put()` refuses the new entry
-instead of throwing out an old one — so the cache never reaches the moment where
-it has to ask which entry is coldest. LRU is what creates that answer. L2 is
-what makes "cold" mean *demoted* rather than *deleted*.
-
---
+There is hot and cold in here now — LRU decides which is which — but "cold"
+still means *deleted*. An evicted chunk is simply gone, and the next request
+that needs it pays for prefill again. L2 is what makes "cold" mean *demoted*
+rather than *deleted*.
