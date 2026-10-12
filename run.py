@@ -10,13 +10,16 @@ Usage:
     python run.py                 chunk_size 256, block_size 16
     python run.py --chunk 64      smaller chunks, so short prompts still cache
     python run.py --no-accumulate each prompt stands alone
+    python run.py --chunk 16 --l1-kb 8   tiny L1, so eviction actually happens
 """
 
 import argparse
 import math
 
 from cache import KVCache
+from controller import EvictionController
 from engine import BlockAllocator, make_pool
+from eviction import LRUPolicy
 from l1 import L1Cache
 from tokenizer import encode
 
@@ -28,6 +31,12 @@ def parse_args():
     p = argparse.ArgumentParser(description="Run prompts through nano-lmcache.")
     p.add_argument("--chunk", type=int, default=256, help="chunk_size (default 256)")
     p.add_argument("--block", type=int, default=16, help="block_size (default 16)")
+    p.add_argument("--l1-kb", type=float, default=L1_CAPACITY_BYTES / 1024,
+                   help="L1 capacity in KB (default 50 MB worth)")
+    p.add_argument("--watermark", type=float, default=0.9,
+                   help="evict when L1 usage reaches this fraction (default 0.9)")
+    p.add_argument("--ratio", type=float, default=0.2,
+                   help="each eviction frees this fraction of capacity (default 0.2)")
     p.add_argument(
         "--no-accumulate",
         action="store_true",
@@ -54,8 +63,11 @@ def main():
 
     pool = make_pool(num_blocks=NUM_BLOCKS, block_size=args.block)
     allocator = BlockAllocator(num_blocks=NUM_BLOCKS)
-    l1 = L1Cache(capacity_bytes=L1_CAPACITY_BYTES)
-    kv = KVCache(pool, allocator, l1, chunk_size=args.chunk)
+    l1 = L1Cache(capacity_bytes=int(args.l1_kb * 1024))
+    policy = LRUPolicy()
+    controller = EvictionController(l1, policy, args.watermark, args.ratio)
+    kv = KVCache(pool, allocator, l1, chunk_size=args.chunk,
+                 policy=policy, controller=controller)
 
     pool_bytes = pool.numel() * pool.element_size()
     print(f"\nnano-lmcache")
@@ -63,7 +75,8 @@ def main():
           f"-> {args.chunk // args.block} blocks per chunk")
     print(f"  L0 pool    {NUM_BLOCKS} blocks, {pool_bytes / 1024:.0f} KB, "
           f"{NUM_BLOCKS * args.block} token slots")
-    print(f"  L1 budget  {L1_CAPACITY_BYTES / 1_000_000:.0f} MB")
+    print(f"  L1 budget  {l1.capacity_bytes / 1024:.1f} KB, evict at "
+          f"{args.watermark:.0%}, free {args.ratio:.0%} each time")
     print(f"  mode       {'independent prompts' if args.no_accumulate else 'accumulating chat'}\n")
 
     n = ask_int("How many turns? ")
@@ -100,6 +113,11 @@ def main():
             print(f"   nothing cacheable: {len(tokens)} tokens < chunk_size {args.chunk}")
         print(f"   {len(tokens)} tokens · {result.hits} hit / {result.misses} miss "
               f"· {result.tokens_reused} reused · {tail} trailing uncached")
+        for key in result.evicted:
+            print(f"   evicted               key {key:#018x}")
+        if result.evicted:
+            print(f"   L1 now {kv.l1.usage_ratio:.0%} full after evicting "
+                  f"{len(result.evicted)} entries")
 
         kv.release(result)
 
@@ -135,8 +153,11 @@ def report(turns, kv, allocator, pool_bytes, args):
 
     print(f"\n  L1  {kv.l1.num_entries} entries, "
           f"{kv.l1.usage_bytes / 1024:.1f} KB of "
-          f"{kv.l1.capacity_bytes / 1_000_000:.0f} MB  "
+          f"{kv.l1.capacity_bytes / 1024:.1f} KB  "
           f"({kv.l1.usage_ratio:.2%} full)")
+
+    print(f"      evicted {kv.controller.num_evictions} entries, "
+          f"{kv.controller.bytes_evicted / 1024:.1f} KB in total")
 
     used_blocks = NUM_BLOCKS - allocator.num_free
     print(f"  L0  {allocator.num_free} of {NUM_BLOCKS} blocks free "

@@ -179,9 +179,11 @@ class LRUPolicy:
         """
         Stop ranking `key`. It is no longer in L1.
 
-        Not called by the eviction path -- the controller already knows it
-        dropped that key. This is for every OTHER way an entry can leave:
-        someone calls l1.delete() directly, or l1.clear() wipes the store.
+        Called for every way an entry can leave. The controller calls it for
+        each key it evicts -- and for stale keys it skips, so they are not
+        nominated again on the next pass. It is also for leaving behind the
+        controller's back: someone calls l1.delete() directly, or l1.clear()
+        wipes the store (use clear() here for that one).
 
         Skip it and the policy slowly fills with keys that are not in L1 any
         more. Then coldest() nominates one, the controller calls l1.delete(),

@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 
 import torch
 
+from controller import EvictionController
 from engine import fake_prefill
+from eviction import LRUPolicy
 from l1 import L1Cache
 from token_db import CHUNK_SIZE, process_tokens
 from transfer import gather, scatter
@@ -57,6 +59,8 @@ class RequestResult:
     """ so we can have a request with necessary blocks like num_tokens, 
     block table but chunks can be empty if the request is not processed yet. """
     chunks: list[ChunkResult] = field(default_factory=list)
+    evicted: list[int] = field(default_factory=list)
+    """Keys pushed out of L1 while this request ran (Stage 4)."""
 
     @property
     def hits(self) -> int:
@@ -93,11 +97,19 @@ class KVCache:
         allocator,
         l1: L1Cache,
         chunk_size: int = CHUNK_SIZE,
+        policy: LRUPolicy | None = None,
+        controller: EvictionController | None = None,
     ):
+        """
+        policy and controller are optional so Stage 3 callers keep working.
+        Without them L1 behaves as before: put() refuses once full.
+        """
         self.pool = pool
         self.allocator = allocator
         self.l1 = l1
         self.chunk_size = chunk_size
+        self.policy = policy
+        self.controller = controller
         self.block_size = pool.shape[3]
 
         if chunk_size % self.block_size != 0:
@@ -134,11 +146,27 @@ class KVCache:
                 # HIT: the KV for these tokens already exists. Write it into
                 # this request's blocks and never run the forward pass.
                 scatter(self.pool, blocks, self.l1.get(key))
+                # A hit makes this entry recent. Forget this and LRU silently
+                # becomes FIFO: the most-reused chunk would be evicted first.
+                if self.policy is not None:
+                    self.policy.touch(key)
                 hit = True
             else:
                 # MISS: compute it, then flatten it out of the pool and keep it.
                 fake_prefill(self.pool, blocks, token_ids[start:end])
-                self.l1.put(key, gather(self.pool, blocks, end - start))
+                stored = self.l1.put(key, gather(self.pool, blocks, end - start))
+                # Only a stored entry is ranked -- ranking a key L1 refused is
+                # the stale-key bug. And a put is the only moment usage goes
+                # up, so it is the only moment the watermark can be crossed.
+                #
+                # A refused put is left uncached (prefilled again next time).
+                # With the controller keeping usage under the watermark, a put
+                # only fails if one entry is bigger than the headroom above it.
+                if stored:
+                    if self.policy is not None:
+                        self.policy.touch(key)
+                    if self.controller is not None:
+                        result.evicted += self.controller.maybe_evict()
                 hit = False
 
             result.chunks.append(ChunkResult(start, end, key, hit, blocks))
