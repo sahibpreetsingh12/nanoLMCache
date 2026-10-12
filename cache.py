@@ -5,9 +5,10 @@ Everything else in this project does one job and knows nothing about the others.
 This file is the one that knows the order they go in:
 
     tokens -> keys          token_db.process_tokens
-    key in L1?              l1.contains
+    key in L1?              l1.contains   (only until the first miss)
       HIT   fetch, scatter into this request's blocks, skip prefill
-      MISS  prefill, gather, store under the key
+      MISS  prefill, gather, store under the key -- and every chunk after
+            this one is a miss too, cached or not
 
 That branch is the entire point of a KV cache. Everything above it exists to
 make the question answerable; everything below it exists to make the answer
@@ -139,10 +140,18 @@ class KVCache:
         result = RequestResult(num_tokens=len(token_ids), block_table=block_table)
 
         cached_upto = 0
+        # Prefix caching: a hit only counts while every chunk before it hit.
+        # Once one chunk misses, everything after it is computed, even if L1
+        # holds it. That is the engine's contract, not a shortcut: vLLM asks
+        # "how many tokens from the start can you give me?" -- one number --
+        # and prefills the rest. A cached chunk after a gap has no way to be
+        # used. (Checking each chunk on its own hid this until Stage 4: with
+        # no eviction, a gap could never appear. LRU evicting chunk 0 made one.)
+        prefix_broken = False
         for start, end, key in process_tokens(token_ids, self.chunk_size):
             blocks = self._blocks_for(block_table, start, end)
 
-            if self.l1.contains(key):
+            if not prefix_broken and self.l1.contains(key):
                 # HIT: the KV for these tokens already exists. Write it into
                 # this request's blocks and never run the forward pass.
                 scatter(self.pool, blocks, self.l1.get(key))
@@ -151,8 +160,15 @@ class KVCache:
                 if self.policy is not None:
                     self.policy.touch(key)
                 hit = True
+            elif self.l1.contains(key):
+                # MISS by position: L1 has this chunk, but a chunk before it
+                # missed, so it is computed anyway. Not re-stored -- same key,
+                # same tokens, same KV -- and not touched: it was not served.
+                fake_prefill(self.pool, blocks, token_ids[start:end])
+                hit = False
             else:
                 # MISS: compute it, then flatten it out of the pool and keep it.
+                prefix_broken = True
                 fake_prefill(self.pool, blocks, token_ids[start:end])
                 stored = self.l1.put(key, gather(self.pool, blocks, end - start))
                 # Only a stored entry is ranked -- ranking a key L1 refused is

@@ -49,7 +49,9 @@ which is the second idea below.
 **Keys are chained.** A chunk's key is hashed together with the key of
 everything before it, so two prompts sharing their first N chunks produce the
 same first N keys — and diverge from N+1 onward. That single fact is why cache
-reuse is always a *prefix*, never a middle match.
+reuse is always a *prefix*, never a middle match. And the lookup has to respect
+it: hits count only until the first miss. Everything after a gap is recomputed,
+even if it is sitting in the cache (see *Bugs I found* below).
 
 **A cache entry cannot contain an address.** KV lives in scattered blocks whose
 IDs are on loan from the allocator. `gather` throws those addresses away and
@@ -111,9 +113,11 @@ SUMMARY
 
 Look at which key was evicted: `0x89bb…`, chunk 0, the one that had just been
 hit. Within a request the chunks are touched in order, so the first chunk ends
-up least recent. Plain LRU ranks by *when*, not by *how much depends on it*.
+up least recent. Plain LRU ranks by *when*, not by *how much depends on it* —
+and because a lookup stops at the first miss, losing chunk 0 means the next
+turn reuses nothing at all, even with chunks 1–4 still in L1.
 
-Tests: `pytest tests/ -q` — 49 passing, offline, no network.
+Tests: `pytest tests/ -q` — 52 passing, offline, no network.
 
 ---
 
@@ -127,11 +131,12 @@ Tests: `pytest tests/ -q` — 49 passing, offline, no network.
         │  token_db.py: chunk(256) + chained prefix hash
         ▼
 [(0,256,h1), (256,512,h2)]                 (start, end, key)
-        │  cache.py: l1.contains(key)?
+        │  cache.py: l1.contains(key)?   — only until the first miss
         ▼
     ┌── HIT ──► l1.get ──► scatter into L0 blocks ──► skip prefill
     │
     └── MISS ─► prefill ─► KV lands in L0, scattered blocks
+        (this chunk and every chunk after it, cached or not)
                         │  gather(block_table)
                         ▼
                  contiguous buffer ──► l1.put(key, buffer)
@@ -199,3 +204,30 @@ There is hot and cold in here now — LRU decides which is which — but "cold"
 still means *deleted*. An evicted chunk is simply gone, and the next request
 that needs it pays for prefill again. L2 is what makes "cold" mean *demoted*
 rather than *deleted*.
+
+### Bugs I found
+
+- [x] **The lookup did not stop at the first miss** *(found in Stage 4, fixed)*
+
+  **What was wrong.** `cache.py` checked every chunk on its own: chunk 0
+  missing, chunks 1–4 cached → 0 recomputed, 4 "hits". LMCache returns one
+  number instead — "how many tokens *from the start* do I have"
+  (`cache_engine.py`, `lookup()`) — so the same situation there is 0 hits and
+  all 5 chunks recomputed.
+
+  **Why it is not just a detail.** The engine asks the cache that one question
+  and prefills everything after the answer. A cached chunk behind a gap has no
+  way to be used. That is the whole contract of prefix caching.
+
+  **How I ended up with it.** I knew LMCache is a prefix cache, and the chained
+  keys already guarantee a key only matches when everything before it matches.
+  So checking each chunk on its own *looked* equivalent — and it was, through
+  Stage 3, because nothing ever left the cache and a gap could not appear.
+  Stage 4 created the first gap: the tiny-L1 run evicted chunk 0, and nano
+  reported hits that a real engine could never use. Reading LMCache's
+  `lookup()` confirmed it. Fix: once a chunk misses, every chunk after it is a
+  miss too. Three tests in `test_eviction.py` pin it; they fail on the old code.
+
+  **What it changes about the eviction story.** Plain LRU evicts chunk 0 first,
+  and chunk 0 is the one every later chunk depends on. With a real prefix
+  lookup, that is not one lost chunk — it is the whole prefix.

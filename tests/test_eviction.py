@@ -235,3 +235,51 @@ def test_without_a_controller_stage3_behaviour_is_unchanged():
     assert result.evicted == []
     assert l1.num_entries == 2  # the third put is refused, nothing evicted
     assert math.isclose(l1.usage_ratio, 1.0)
+
+
+# =============================================================================
+# Prefix caching: a hit only counts until the first miss
+# =============================================================================
+#
+# Found in Stage 4: cache.py used to check every chunk on its own, so a cached
+# chunk after a missing one still "hit". The engine can only skip a prefix
+# (it asks "how many tokens from the start?"), so that hit could never be used.
+
+
+def test_missing_first_chunk_means_no_hits():
+    # The chunk-0 case from the tiny-L1 run: chunk 0 gone, chunks 1-4 cached.
+    kv, l1 = make_kv(20, watermark=0.9, ratio=0.2)
+    tokens = list(range(5 * CHUNK))
+    first = run(kv, tokens)
+    l1.delete(first.chunks[0].key)
+    kv.policy.forget(first.chunks[0].key)
+
+    again = run(kv, tokens)
+    assert again.hits == 0  # chunks 1-4 are in L1 but behind a gap
+    assert all(l1.contains(c.key) for c in first.chunks)  # chunk 0 stored again
+
+
+def test_gap_in_the_middle_stops_the_hit_streak():
+    kv, l1 = make_kv(20, watermark=0.9, ratio=0.2)
+    tokens = list(range(5 * CHUNK))
+    first = run(kv, tokens)
+    l1.delete(first.chunks[2].key)
+    kv.policy.forget(first.chunks[2].key)
+
+    again = run(kv, tokens)
+    assert [c.hit for c in again.chunks] == [True, True, False, False, False]
+    assert again.tokens_reused == 2 * CHUNK
+
+
+def test_chunks_behind_a_gap_are_not_touched():
+    # They were computed, not served -- so they must not look recently used.
+    kv, l1 = make_kv(20, watermark=0.9, ratio=0.2)
+    tokens = list(range(3 * CHUNK))
+    first = run(kv, tokens)
+    keys = [c.key for c in first.chunks]
+    l1.delete(keys[0])
+    kv.policy.forget(keys[0])
+
+    run(kv, tokens)
+    # chunk 0 was re-stored (now hottest); chunks 1-2 kept their old places
+    assert kv.policy.coldest() == [keys[1], keys[2], keys[0]]
