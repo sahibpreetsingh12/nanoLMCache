@@ -221,7 +221,6 @@ class LRUPolicy:
         """
         Forget everything. The partner to l1.clear(), which drops every entry
         at once and would otherwise leave the whole ranking stale.
-        
         """
         self._order.clear()
 
